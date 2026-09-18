@@ -31,7 +31,7 @@ clinically-informed mock so the app never hard-crashes.
 | Tabular model (RandomForest, Kaggle stroke-prediction CSV) | ✅ Trained — AUC 0.83, accuracy 0.89 on held-out test set |
 | CT model (ResNet18, Kaggle Head-CT Hemorrhage) | 🟡 Trained — batch validation in progress |
 | ECG model (1D CNN) | ⚪ Architecture + training script ready; no real dataset sourced yet — currently running on the deterministic synthetic fallback |
-| Dashboard wiring + composite-score scale bug | ✅ Fixed |
+| Dashboard wiring + composite-score scale bug | not  Fixed |
 
 ## Setup
 
