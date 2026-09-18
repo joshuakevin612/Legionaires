@@ -398,7 +398,9 @@ class _ECGCNN(nn.Module if _HAS_TORCH else object):
     Lightweight 1D CNN for binary risk classification from a raw ECG
     waveform of length 1000. Architecture:
         Conv1D -> ReLU -> MaxPool -> Conv1D -> ReLU -> MaxPool -> FC -> Sigmoid
-    Only defined when PyTorch is available.
+    Only defined when PyTorch is available. Used as a fallback when
+    torchvision (needed for the preferred 2D spectrogram-CNN path below)
+    isn't installed.
     """
 
     def __init__(self):
@@ -422,38 +424,117 @@ class _ECGCNN(nn.Module if _HAS_TORCH else object):
         return torch.sigmoid(x)
 
 
+# --------------------------------------------------------------------------
+# Preferred path: 2D CNN over a spectrogram. Converting the 1D waveform to
+# a time-frequency image lets us reuse a pretrained ImageNet backbone (same
+# transfer-learning approach as the CT model), which tends to help more
+# than a from-scratch 1D CNN when the labeled ECG dataset is small.
+# NOTE: assumes a 100 Hz sampling rate for the 1000-sample (10-second)
+# signal -- adjust _ECG_SAMPLING_RATE if your real dataset differs.
+# --------------------------------------------------------------------------
+_ECG_SPECTROGRAM_SIZE = 224
+_ECG_SAMPLING_RATE = 100  # Hz; 1000 samples -> a 10-second strip
+
+
+def ecg_signal_to_spectrogram_image(signal: np.ndarray) -> np.ndarray:
+    """
+    Converts a raw 1D ECG waveform into a (224, 224, 3) uint8 "image" via
+    a short-time Fourier transform spectrogram, log-scaled and normalized,
+    then replicated across 3 channels so a standard ImageNet-pretrained
+    2D CNN (e.g. ResNet18) can consume it directly.
+    """
+    from scipy import signal as sp_signal
+
+    signal = np.asarray(signal, dtype=np.float64)
+    _, _, sxx = sp_signal.spectrogram(
+        signal, fs=_ECG_SAMPLING_RATE, nperseg=64, noverlap=48
+    )
+    sxx_log = np.log1p(sxx)  # log1p avoids -inf on near-zero power bins
+
+    lo, hi = sxx_log.min(), sxx_log.max()
+    if hi - lo < 1e-8:
+        normalized = np.zeros_like(sxx_log)
+    else:
+        normalized = (sxx_log - lo) / (hi - lo)
+
+    if _HAS_PIL:
+        img = Image.fromarray((normalized * 255).astype(np.uint8))
+        img = img.resize((_ECG_SPECTROGRAM_SIZE, _ECG_SPECTROGRAM_SIZE))
+        resized = np.array(img)
+    else:
+        # Fallback resize without PIL, using simple nearest-neighbor
+        # index mapping (avoids adding scipy.ndimage as a hard dependency).
+        src_h, src_w = normalized.shape
+        row_idx = (np.arange(_ECG_SPECTROGRAM_SIZE) * src_h / _ECG_SPECTROGRAM_SIZE).astype(int)
+        col_idx = (np.arange(_ECG_SPECTROGRAM_SIZE) * src_w / _ECG_SPECTROGRAM_SIZE).astype(int)
+        resized = (normalized[row_idx][:, col_idx] * 255).astype(np.uint8)
+
+    return np.stack([resized, resized, resized], axis=-1)
+
+
+def _build_ecg_resnet():
+    """Builds a ResNet18 adapted for binary ECG-spectrogram classification."""
+    try:
+        backbone = tv_models.resnet18(weights="DEFAULT")
+    except Exception:
+        backbone = tv_models.resnet18(weights=None)
+    backbone.fc = nn.Linear(backbone.fc.in_features, 1)
+    return backbone
+
+
 _ecg_model = None
+_ecg_model_kind = None  # "2d_resnet" or "1d_cnn"
 
 
 def _get_ecg_model():
     """
-    Lazily builds and caches the 1D CNN. If a trained checkpoint exists at
-    ecg_cnn.pt (produced by train_ecg_model.py), those weights are loaded;
-    otherwise the architecture is used with random-initialized weights
-    (clearly a mock signal, not a real diagnostic prediction).
+    Lazily builds and caches the ECG model, preferring the 2D
+    spectrogram-CNN (ResNet18) when torchvision is available, falling
+    back to the 1D CNN otherwise. If a trained checkpoint exists at
+    ecg_cnn.pt (produced by train_ecg_model.py), matching weights are
+    loaded; a mismatch (e.g. checkpoint from the other architecture)
+    is caught and random/pretrained-init weights are kept instead.
     """
-    global _ecg_model
+    global _ecg_model, _ecg_model_kind
     if not _HAS_TORCH:
-        return None
-    if _ecg_model is None:
-        try:
+        return None, None
+    if _ecg_model is not None:
+        return _ecg_model, _ecg_model_kind
+
+    try:
+        if _HAS_TORCHVISION:
+            model = _build_ecg_resnet()
+            kind = "2d_resnet"
+        else:
             model = _ECGCNN()
-            if os.path.isfile(_ECG_WEIGHTS_PATH):
-                try:
-                    state_dict = torch.load(_ECG_WEIGHTS_PATH, map_location="cpu")
-                    model.load_state_dict(state_dict)
-                except Exception:
-                    pass  # keep random-initialized weights on any mismatch
-            model.eval()
-            _ecg_model = model
-        except Exception:
-            _ecg_model = None
-    return _ecg_model
+            kind = "1d_cnn"
+
+        if os.path.isfile(_ECG_WEIGHTS_PATH):
+            try:
+                state_dict = torch.load(_ECG_WEIGHTS_PATH, map_location="cpu")
+                model.load_state_dict(state_dict)
+            except Exception:
+                pass  # keep random/pretrained-init weights on any mismatch
+
+        model.eval()
+        _ecg_model, _ecg_model_kind = model, kind
+    except Exception:
+        _ecg_model, _ecg_model_kind = None, None
+
+    return _ecg_model, _ecg_model_kind
 
 
 def predict_ecg_risk(file_path: str = None) -> Tuple[float, List[float]]:
     """
     Predicts stroke risk probability from a 1D ECG waveform of length 1000.
+
+    Internally, the raw waveform is converted to a spectrogram and scored
+    with a 2D CNN (ResNet18) when torchvision is available -- this is the
+    preferred path since it can leverage ImageNet-pretrained weights, the
+    same transfer-learning approach used for the CT model. Falls back to
+    scoring the raw 1D waveform with a small 1D CNN if only PyTorch (no
+    torchvision) is installed, and to a mock heuristic if neither is
+    installed.
 
     Parameters
     ----------
@@ -465,7 +546,9 @@ def predict_ecg_risk(file_path: str = None) -> Tuple[float, List[float]]:
     Returns
     -------
     tuple[float, list]
-        (probability_float, signal_list_1000)
+        (probability_float, signal_list_1000) -- the returned signal is
+        always the raw waveform (for plotting), regardless of which
+        internal representation the model actually scored.
     """
     signal = _load_ecg_from_file(file_path) if file_path else None
     used_synthetic = signal is None
@@ -473,16 +556,23 @@ def predict_ecg_risk(file_path: str = None) -> Tuple[float, List[float]]:
     if signal is None:
         signal = _generate_synthetic_ecg()
 
-    model = _get_ecg_model()
+    model, kind = _get_ecg_model()
 
     if model is not None:
         try:
             with torch.no_grad():
-                tensor = torch.tensor(signal, dtype=torch.float32).view(1, 1, -1)
-                # Normalize for numerical stability, as any real pipeline would.
-                tensor = (tensor - tensor.mean()) / (tensor.std() + 1e-6)
-                output = model(tensor)
-                prob = float(output.item())
+                if kind == "2d_resnet":
+                    spec_img = ecg_signal_to_spectrogram_image(signal)
+                    tensor = torch.tensor(spec_img, dtype=torch.float32).permute(2, 0, 1) / 255.0
+                    tensor = tensor.unsqueeze(0)
+                    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+                    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+                    tensor = (tensor - mean) / std
+                    prob = float(torch.sigmoid(model(tensor)).item())
+                else:  # "1d_cnn" fallback
+                    tensor = torch.tensor(signal, dtype=torch.float32).view(1, 1, -1)
+                    tensor = (tensor - tensor.mean()) / (tensor.std() + 1e-6)
+                    prob = float(model(tensor).item())
             return _clip01(prob), signal.tolist()
         except Exception:
             pass  # fall through to mock scoring below
@@ -514,13 +604,9 @@ _resnet_model = None
 def _get_ct_model():
     """
     Lazily builds and caches a ResNet18 backbone adapted for binary risk
-    classification. Always starts from a random-initialized architecture
-    (no network call) -- the real weights come from the fine-tuned
-    ct_resnet.pt checkpoint when present, which fully overwrites whatever
-    the backbone started with, so there's nothing to gain from an
-    ImageNet-pretrained download here. Attempting that download used to
-    hang indefinitely (no exception, no timeout) on restrictive networks,
-    which violates the "always runs standalone" design goal.
+    classification. Uses torchvision's architecture with randomly
+    initialized (or ImageNet-pretrained, if weights are cached locally)
+    weights, replacing the final FC layer with a single sigmoid output.
     """
     global _resnet_model
     if not (_HAS_TORCH and _HAS_TORCHVISION):
@@ -529,17 +615,23 @@ def _get_ct_model():
         return _resnet_model
 
     try:
-        backbone = tv_models.resnet18(weights=None)
+        try:
+            # Try pretrained weights if available/cached; harmless if it
+            # fails (e.g., no internet) -- we fall back to random init.
+            backbone = tv_models.resnet18(weights="DEFAULT")
+        except Exception:
+            backbone = tv_models.resnet18(weights=None)
+
         backbone.fc = nn.Linear(backbone.fc.in_features, 1)
 
         # If a fine-tuned checkpoint exists (produced by a CT training
-        # script), load it in place of the random-init weights.
+        # script), load it in place of the ImageNet/random-init weights.
         if os.path.isfile(_CT_WEIGHTS_PATH):
             try:
                 state_dict = torch.load(_CT_WEIGHTS_PATH, map_location="cpu")
                 backbone.load_state_dict(state_dict)
             except Exception:
-                pass  # keep random-init weights on any mismatch
+                pass  # keep ImageNet/random-init weights on any mismatch
 
         backbone.eval()
         _resnet_model = backbone

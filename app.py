@@ -109,13 +109,6 @@ st.markdown(
     .badge-green { background-color: var(--green-soft); color: var(--green); border-color: var(--green); }
     .badge-yellow { background-color: var(--yellow-soft); color: #8a6300; border-color: var(--yellow); }
     .badge-red { background-color: var(--red-soft); color: var(--red); border-color: var(--red); }
-    .section-card {
-        background-color: var(--surface);
-        border: 2px solid var(--border);
-        border-radius: 14px;
-        padding: 16px 18px;
-        margin-bottom: 10px;
-    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -283,53 +276,51 @@ p_ecg = 0.0
 p_ct = 0.0
 
 with col1:
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("📈 ECG Waveform")
-    ecg_file = st.file_uploader("Upload ECG (.csv or .npy)", type=["csv", "npy"], key="ecg_uploader")
+    with st.container(border=True):
+        st.subheader("📈 ECG Waveform")
+        ecg_file = st.file_uploader("Upload ECG (.csv or .npy)", type=["csv", "npy"], key="ecg_uploader")
 
-    if ecg_file is not None:
-        ecg_path = save_upload_to_temp(ecg_file)
-        try:
-            p_ecg, ecg_extra = predict_ecg_risk(ecg_path)
-            waveform = load_waveform(ecg_path, ecg_file.name)
-            st.pyplot(plot_waveform(waveform), use_container_width=True)
-            st.metric("ECG Risk Score", f"{p_ecg * 100:.1f}%")
-            if ecg_extra:
-                with st.expander("Model details"):
-                    st.write(f"Signal length: {len(ecg_extra)} samples")
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not process ECG file: {exc}")
-        finally:
+        if ecg_file is not None:
+            ecg_path = save_upload_to_temp(ecg_file)
             try:
-                os.remove(ecg_path)
-            except OSError:
-                pass
-    else:
-        st.info("Awaiting ECG upload — waveform and risk score will appear here.")
-    st.markdown("</div>", unsafe_allow_html=True)
+                p_ecg, ecg_extra = predict_ecg_risk(ecg_path)
+                waveform = load_waveform(ecg_path, ecg_file.name)
+                st.pyplot(plot_waveform(waveform), width="stretch")
+                st.metric("ECG Risk Score", f"{p_ecg * 100:.1f}%")
+                if ecg_extra:
+                    with st.expander("Model details"):
+                        st.write(f"Signal length: {len(ecg_extra)} samples")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not process ECG file: {exc}")
+            finally:
+                try:
+                    os.remove(ecg_path)
+                except OSError:
+                    pass
+        else:
+            st.info("Awaiting ECG upload — waveform and risk score will appear here.")
 
 with col2:
-    st.markdown('<div class="section-card">', unsafe_allow_html=True)
-    st.subheader("🖼️ CT Scan")
-    ct_file = st.file_uploader("Upload CT Scan (.png or .jpg)", type=["png", "jpg", "jpeg"], key="ct_uploader")
+    with st.container(border=True):
+        st.subheader("🖼️ CT Scan")
+        ct_file = st.file_uploader("Upload CT Scan (.png or .jpg)", type=["png", "jpg", "jpeg"], key="ct_uploader")
 
-    if ct_file is not None:
-        ct_path = save_upload_to_temp(ct_file)
-        try:
-            p_ct = predict_ct_risk(ct_path)
-            image = Image.open(ct_path)
-            st.image(image, caption="Uploaded CT Scan", use_container_width=True)
-            st.metric("CT Risk Score", f"{p_ct * 100:.1f}%")
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not process CT scan: {exc}")
-        finally:
+        if ct_file is not None:
+            ct_path = save_upload_to_temp(ct_file)
             try:
-                os.remove(ct_path)
-            except OSError:
-                pass
-    else:
-        st.info("Awaiting CT scan upload — image preview and risk score will appear here.")
-    st.markdown("</div>", unsafe_allow_html=True)
+                p_ct = predict_ct_risk(ct_path)
+                image = Image.open(ct_path)
+                st.image(image, caption="Uploaded CT Scan", width="stretch")
+                st.metric("CT Risk Score", f"{p_ct * 100:.1f}%")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Could not process CT scan: {exc}")
+            finally:
+                try:
+                    os.remove(ct_path)
+                except OSError:
+                    pass
+        else:
+            st.info("Awaiting CT scan upload — image preview and risk score will appear here.")
 
 # --------------------------------------------------------------------------
 # Bottom dashboard — Composite risk

@@ -1,45 +1,51 @@
 """
 train_ecg_model.py
 ===================
-Trains the 1D CNN used by `predict_ecg_risk()` in ml_engine.py on a real
-labeled ECG dataset, and saves the weights so ml_engine.py picks them up
-automatically.
-
-You need an ECG dataset for this -- it wasn't part of what you uploaded.
-Good free options if you don't have one yet:
-  - PhysioNet MIT-BIH Arrhythmia Database
-  - PTB-XL (physionet.org/content/ptb-xl)
-  - Kaggle "ECG Heartbeat Categorization Dataset" (already resampled to
-    fixed-length beats, closest match to this contract's length-1000 format)
+Trains the 2D spectrogram-CNN (ResNet18) used by predict_ecg_risk() in
+ml_engine.py -- converts each raw ECG waveform to a spectrogram image,
+then fine-tunes an ImageNet-pretrained ResNet18 on it (same
+transfer-learning approach as the CT model).
 
 --------------------------------------------------------------------------
-EXPECTED DATA LAYOUT
+DATASET -- use one that's actually labeled for what this product claims
 --------------------------------------------------------------------------
-This script expects ONE of:
+ECG contributes to stroke risk through ONE well-established mechanism:
+detecting atrial fibrillation (AFib), a heart arrhythmia that causes
+roughly 15-30% of ischemic strokes by letting clots form in the heart
+and travel to the brain. For that clinical story to actually hold up,
+train on a dataset labeled for AFib specifically -- not a generic
+"heartbeat categorization" dataset that classifies unrelated beat types.
 
-(a) A single CSV where each row is one ECG sample:
-        col_0, col_1, ..., col_999, label
-    i.e. 1000 signal columns + a trailing 0/1 label column.
+Recommended: the PhysioNet/CinC 2017 AF Classification Challenge dataset
+("training2017"), free at:
+    https://physionet.org/content/challenge-2017/1.0.0/
 
-(b) A folder of individual .npy files (one array of length 1000 each),
-    plus a labels.csv with two columns: filename,label
+It ships ~8,500 single-lead ECG recordings (variable length, 300 Hz) as
+.mat files, with a REFERENCE.csv labeling each as one of:
+    N = Normal, A = AFib, O = Other rhythm, ~ = too noisy to classify
 
-Adjust `load_dataset()` below to match whatever shape your specific
-dataset actually comes in -- ECG datasets vary a lot in format, this is
-the one part of the pipeline you'll most likely need to hand-adapt.
+For THIS product's binary contract, treat A (AFib) as the positive
+class and everything else as negative -- see `label_from_class()` below.
+(Alternative: MIT-BIH Atrial Fibrillation Database, if you want longer
+multi-hour recordings you'll need to segment yourself.)
+
+--------------------------------------------------------------------------
+EXPECTED DATA LAYOUT (after downloading training2017 and unzipping)
+--------------------------------------------------------------------------
+    training2017/
+    |-- A00001.mat, A00002.mat, ...     <-- one .mat file per recording
+    `-- REFERENCE.csv                    <-- columns: filename, label (N/A/O/~)
 
 --------------------------------------------------------------------------
 USAGE
 --------------------------------------------------------------------------
-    python train_ecg_model.py --csv /path/to/ecg_dataset.csv
-    # or
-    python train_ecg_model.py --npy-dir /path/to/npy_folder --labels /path/to/labels.csv
+    python train_ecg_model.py --data-dir training2017 --reference training2017/REFERENCE.csv
 
 Output:
-    ecg_cnn.pt   -- PyTorch state_dict, auto-loaded by ml_engine.py's
-                    predict_ecg_risk() the next time it runs.
+    ecg_cnn.pt   -- PyTorch state_dict (ResNet18), auto-loaded by
+                    ml_engine.py's predict_ecg_risk() the next time it runs.
 
-Requires: pip install torch pandas numpy scikit-learn
+Requires: pip install torch torchvision scipy pandas scikit-learn pillow
 """
 
 import argparse
@@ -52,79 +58,100 @@ import pandas as pd
 try:
     import torch
     import torch.nn as nn
-    from torch.utils.data import DataLoader, TensorDataset
+    import torchvision.models as tv_models
+    from torch.utils.data import DataLoader, Dataset
 except ImportError:
-    sys.exit("ERROR: this script requires PyTorch. Install with: pip install torch")
+    sys.exit(
+        "ERROR: this script requires torch + torchvision. "
+        "Install with: pip install torch torchvision"
+    )
+
+try:
+    from scipy.io import loadmat
+    from scipy import signal as sp_signal
+except ImportError:
+    sys.exit("ERROR: this script requires scipy. Install with: pip install scipy")
 
 from sklearn.model_selection import train_test_split
 
-_ECG_LENGTH = 1000
+try:
+    from PIL import Image
+except ImportError:
+    sys.exit("ERROR: this script requires Pillow. Install with: pip install pillow")
+
+_TARGET_LENGTH = 1000        # must match ml_engine.py's _ECG_LENGTH
+_SAMPLING_RATE = 100         # must match ml_engine.py's _ECG_SAMPLING_RATE
+_SPECTROGRAM_SIZE = 224      # must match ml_engine.py's _ECG_SPECTROGRAM_SIZE
+_SOURCE_FS = 300             # training2017's actual recording rate
 
 
-# --------------------------------------------------------------------------
-# Must exactly match the _ECGCNN class in ml_engine.py so the saved
-# state_dict loads back in correctly.
-# --------------------------------------------------------------------------
-class ECGCNN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv1d(1, 16, kernel_size=7, padding=3)
-        self.conv2 = nn.Conv1d(16, 32, kernel_size=5, padding=2)
-        self.pool = nn.MaxPool1d(2)
-        self.relu = nn.ReLU()
-        flattened_size = 32 * (_ECG_LENGTH // 4)
-        self.fc1 = nn.Linear(flattened_size, 64)
-        self.fc2 = nn.Linear(64, 1)
-
-    def forward(self, x):
-        x = self.pool(self.relu(self.conv1(x)))
-        x = self.pool(self.relu(self.conv2(x)))
-        x = x.view(x.size(0), -1)
-        x = self.relu(self.fc1(x))
-        x = self.fc2(x)
-        return torch.sigmoid(x)
+def label_from_class(raw_label: str) -> int:
+    """A (AFib) -> 1, everything else (N/O/~) -> 0."""
+    return 1 if str(raw_label).strip().upper() == "A" else 0
 
 
-def load_dataset_from_csv(csv_path: str):
-    """Layout (a): 1000 signal columns + trailing label column."""
-    df = pd.read_csv(csv_path, header=None)
-    X = df.iloc[:, :_ECG_LENGTH].to_numpy(dtype=np.float32)
-    y = df.iloc[:, _ECG_LENGTH].to_numpy(dtype=np.float32)
-    return X, y
+def load_and_resample_mat(path: str) -> np.ndarray:
+    """
+    Loads a training2017 .mat recording, takes the first _TARGET_LENGTH*3
+    seconds' worth of raw samples (or pads if shorter), then resamples
+    down from 300 Hz to 100 Hz so every signal ends up length 1000 --
+    matching the contract's fixed-length assumption.
+    """
+    mat = loadmat(path)
+    raw = mat["val"].flatten().astype(np.float64)
+
+    # Resample from the source rate to our target rate/length.
+    target_len_at_source_rate = int(_TARGET_LENGTH * _SOURCE_FS / _SAMPLING_RATE)
+    if raw.size >= target_len_at_source_rate:
+        raw = raw[:target_len_at_source_rate]
+    else:
+        raw = np.pad(raw, (0, target_len_at_source_rate - raw.size), mode="edge")
+
+    resampled = sp_signal.resample(raw, _TARGET_LENGTH)
+    return resampled.astype(np.float32)
 
 
-def load_dataset_from_npy_dir(npy_dir: str, labels_csv: str):
-    """Layout (b): folder of .npy files + a filename,label CSV."""
-    labels_df = pd.read_csv(labels_csv)
-    signals, labels = [], []
-    for _, row in labels_df.iterrows():
-        arr = np.load(os.path.join(npy_dir, row["filename"])).astype(np.float32).flatten()
-        if arr.size != _ECG_LENGTH:
-            if arr.size > _ECG_LENGTH:
-                arr = arr[:_ECG_LENGTH]
-            else:
-                arr = np.pad(arr, (0, _ECG_LENGTH - arr.size), mode="edge")
-        signals.append(arr)
-        labels.append(float(row["label"]))
-    return np.stack(signals), np.array(labels, dtype=np.float32)
+def signal_to_spectrogram_image(signal: np.ndarray) -> np.ndarray:
+    """Identical logic to ml_engine.ecg_signal_to_spectrogram_image, kept
+    self-contained here so this script doesn't need to import ml_engine."""
+    _, _, sxx = sp_signal.spectrogram(signal, fs=_SAMPLING_RATE, nperseg=64, noverlap=48)
+    sxx_log = np.log1p(sxx)
+    lo, hi = sxx_log.min(), sxx_log.max()
+    normalized = np.zeros_like(sxx_log) if (hi - lo) < 1e-8 else (sxx_log - lo) / (hi - lo)
+    img = Image.fromarray((normalized * 255).astype(np.uint8))
+    img = img.resize((_SPECTROGRAM_SIZE, _SPECTROGRAM_SIZE))
+    resized = np.array(img)
+    return np.stack([resized, resized, resized], axis=-1)
 
 
-def normalize_per_sample(X: np.ndarray) -> np.ndarray:
-    """Z-score each signal individually -- matches the normalization
-    predict_ecg_risk() applies at inference time."""
-    mean = X.mean(axis=1, keepdims=True)
-    std = X.std(axis=1, keepdims=True) + 1e-6
-    return (X - mean) / std
+class ECGSpectrogramDataset(Dataset):
+    def __init__(self, filepaths, labels):
+        self.filepaths = filepaths
+        self.labels = labels
+        self.mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+        self.std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+
+    def __len__(self):
+        return len(self.filepaths)
+
+    def __getitem__(self, idx):
+        raw_signal = load_and_resample_mat(self.filepaths[idx])
+        spec_img = signal_to_spectrogram_image(raw_signal)  # (224,224,3) uint8
+        tensor = torch.tensor(spec_img, dtype=torch.float32).permute(2, 0, 1) / 255.0
+        tensor = (tensor - torch.tensor(self.mean, dtype=torch.float32)) / torch.tensor(
+            self.std, dtype=torch.float32
+        )
+        label = torch.tensor([self.labels[idx]], dtype=torch.float32)
+        return tensor, label
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", help="Path to CSV: 1000 signal cols + label col")
-    parser.add_argument("--npy-dir", help="Folder of per-sample .npy signal files")
-    parser.add_argument("--labels", help="labels.csv (filename,label) -- required with --npy-dir")
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--data-dir", required=True, help="Folder of .mat recordings (training2017)")
+    parser.add_argument("--reference", required=True, help="REFERENCE.csv: filename,label columns (no header)")
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument(
         "--out-dir",
         default=os.path.dirname(os.path.abspath(__file__)),
@@ -132,50 +159,78 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.csv:
-        X, y = load_dataset_from_csv(args.csv)
-    elif args.npy_dir and args.labels:
-        X, y = load_dataset_from_npy_dir(args.npy_dir, args.labels)
-    else:
-        sys.exit("ERROR: provide either --csv, or both --npy-dir and --labels")
+    ref = pd.read_csv(args.reference, header=None, names=["filename", "label"])
+    filepaths = [os.path.join(args.data_dir, f"{fn}.mat") for fn in ref["filename"]]
+    labels = ref["label"].apply(label_from_class).to_numpy()
 
-    print(f"Loaded {len(y)} ECG samples | positive rate: {y.mean():.3%}")
-    X = normalize_per_sample(X)
+    keep = np.array([os.path.isfile(fp) for fp in filepaths])
+    if not keep.all():
+        print(f"WARNING: {(~keep).sum()} referenced .mat files not found, skipping them.")
+    filepaths = [fp for fp, k in zip(filepaths, keep) if k]
+    labels = labels[keep]
+
+    print(f"Loaded {len(labels)} ECG recordings | AFib (positive) rate: {labels.mean():.3%}")
 
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y if len(np.unique(y)) > 1 else None
+        filepaths, labels, test_size=0.2, random_state=42, stratify=labels
     )
 
-    train_ds = TensorDataset(
-        torch.tensor(X_train).unsqueeze(1), torch.tensor(y_train).unsqueeze(1)
-    )
-    val_ds = TensorDataset(torch.tensor(X_val).unsqueeze(1), torch.tensor(y_val).unsqueeze(1))
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size)
+    train_ds = ECGSpectrogramDataset(X_train, y_train)
+    val_ds = ECGSpectrogramDataset(X_val, y_val)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, num_workers=2)
 
-    model = ECGCNN()
+    try:
+        model = tv_models.resnet18(weights="DEFAULT")
+    except Exception:
+        model = tv_models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, 1)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on device: {device}")
+    model.to(device)
+
+    # AFib is the minority class -- weight its loss up rather than letting
+    # the model learn to just predict "normal" every time.
+    n_pos = labels.sum()
+    n_neg = len(labels) - n_pos
+    pos_weight = torch.tensor([n_neg / max(n_pos, 1)], dtype=torch.float32).to(device)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
+    n_train_batches = len(train_loader)
     for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss = 0.0
-        for xb, yb in train_loader:
+        for batch_idx, (xb, yb) in enumerate(train_loader, start=1):
+            xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            preds = model(xb)
-            loss = criterion(preds, yb)
+            logits = model(xb)
+            loss = criterion(logits, yb)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * xb.size(0)
+
+            # Print progress every 10 batches (or every batch if the
+            # epoch is small) so the terminal never looks frozen.
+            if batch_idx % 10 == 0 or batch_idx == n_train_batches:
+                print(
+                    f"  epoch {epoch}/{args.epochs} | batch {batch_idx}/{n_train_batches} "
+                    f"| running loss {train_loss / (batch_idx * args.batch_size):.4f}",
+                    flush=True,
+                )
         train_loss /= len(train_ds)
 
         model.eval()
         val_loss, correct = 0.0, 0
         with torch.no_grad():
             for xb, yb in val_loader:
-                preds = model(xb)
-                val_loss += criterion(preds, yb).item() * xb.size(0)
-                correct += ((preds >= 0.5).float() == yb).sum().item()
+                xb, yb = xb.to(device), yb.to(device)
+                logits = model(xb)
+                val_loss += criterion(logits, yb).item() * xb.size(0)
+                preds = (torch.sigmoid(logits) >= 0.5).float()
+                correct += (preds == yb).sum().item()
         val_loss /= len(val_ds)
         val_acc = correct / len(val_ds)
 
@@ -185,8 +240,8 @@ def main():
         )
 
     out_path = os.path.join(args.out_dir, "ecg_cnn.pt")
-    torch.save(model.state_dict(), out_path)
-    print(f"\nSaved trained ECG CNN weights -> {out_path}")
+    torch.save(model.to("cpu").state_dict(), out_path)
+    print(f"\nSaved trained ECG spectrogram-CNN weights -> {out_path}")
     print("ml_engine.py will now load these automatically on next run.")
 
 
