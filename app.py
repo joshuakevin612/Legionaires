@@ -1,7 +1,8 @@
 """
 CardioRisk AI — Multimodal Cardiovascular Risk Dashboard
-A dark-themed Streamlit application that fuses tabular vitals, ECG waveform
-data, and CT scan imagery into a single composite risk score.
+A black / amber-yellow themed Streamlit application that fuses tabular
+vitals, ECG waveform data, and CT scan imagery into a single composite
+risk score.
 
 Run with:
     streamlit run app.py
@@ -30,7 +31,7 @@ from ml_engine import (
 )
 
 # --------------------------------------------------------------------------
-# Page configuration & dark theme styling
+# Page configuration & theme styling
 # --------------------------------------------------------------------------
 st.set_page_config(
     page_title="CardioRisk AI",
@@ -39,75 +40,289 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Design tokens: near-black base, one amber-yellow accent, warm mid-tone
+# greys for structure. Risk badges keep semantic red/amber/green — the one
+# deliberate exception to the palette, because a screening tool that mutes
+# "high risk" to on-brand yellow is a usability problem, not a style win.
 DARK_CSS = """
 <style>
-    .stApp {
-        background-color: #0e1117;
-        color: #e6e6e6;
-    }
-    section[data-testid="stSidebar"] {
-        background-color: #14181f;
-        border-right: 1px solid #262b36;
-    }
-    div[data-testid="stMetric"] {
-        background-color: #171b24;
-        border: 1px solid #2a2f3a;
-        border-radius: 12px;
-        padding: 18px 20px;
-    }
-    div[data-testid="stMetricValue"] {
-        color: #ffffff;
-    }
-    .status-badge {
-        display: inline-block;
-        padding: 10px 22px;
-        border-radius: 999px;
-        font-weight: 700;
-        font-size: 1.05rem;
-        letter-spacing: 0.5px;
-        text-align: center;
-    }
-    .badge-green {
-        background-color: rgba(34, 197, 94, 0.15);
-        color: #22c55e;
-        border: 1px solid #22c55e;
-    }
-    .badge-yellow {
-        background-color: rgba(234, 179, 8, 0.15);
-        color: #eab308;
-        border: 1px solid #eab308;
-    }
-    .badge-red {
-        background-color: rgba(239, 68, 68, 0.15);
-        color: #ef4444;
-        border: 1px solid #ef4444;
-    }
-    .section-card {
-        background-color: #12151c;
-        border: 1px solid #232733;
-        border-radius: 14px;
-        padding: 16px 18px;
-        margin-bottom: 14px;
-    }
-    .subtle {
-        color: #9aa3b2;
-        font-size: 0.88rem;
-    }
-    h1, h2, h3 {
-        color: #f5f5f5;
-    }
-    div.stButton > button {
-        width: 100%;
-        border-radius: 10px;
-        border: 1px solid #3b4252;
-        background-color: #1c2029;
-        color: #e6e6e6;
-        font-weight: 600;
-    }
-    div.stButton > button:hover {
-        border-color: #ef4444;
-        color: #ef4444;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Inter:wght@400;500;600;700&display=swap');
+
+:root {
+    --bg: #0a0906;
+    --bg-soft: #100e0a;
+    --surface: #16130e;
+    --surface-2: #1e1a12;
+    --border: #33291a;
+    --border-strong: #574726;
+    --yellow: #f2b807;
+    --yellow-soft: rgba(242, 184, 7, 0.12);
+    --yellow-dim: #8c6a16;
+    --text: #f4efe3;
+    --text-muted: #9c9280;
+    --red: #e5484d;
+    --red-soft: rgba(229, 72, 77, 0.14);
+    --green: #5fb77e;
+    --green-soft: rgba(95, 183, 126, 0.14);
+}
+
+@keyframes riseIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes underlineDraw {
+    from { transform: scaleX(0); }
+    to   { transform: scaleX(1); }
+}
+@keyframes glowPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.35); }
+    50%      { box-shadow: 0 0 0 8px rgba(229, 72, 77, 0); }
+}
+@keyframes shimmer {
+    0%   { background-position: -120px 0; }
+    100% { background-position: 220px 0; }
+}
+@keyframes dotPulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.35; }
+}
+
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+.stApp {
+    background: var(--bg);
+    color: var(--text);
+    position: relative;
+}
+
+/* faint hazard-stripe watermark, top-right corner only — a wink at the
+   subject matter (risk / caution), never in reading areas */
+.stApp::before {
+    content: "";
+    position: fixed;
+    top: -120px;
+    right: -160px;
+    width: 480px;
+    height: 480px;
+    background: repeating-linear-gradient(
+        45deg,
+        var(--yellow) 0px, var(--yellow) 14px,
+        transparent 14px, transparent 28px
+    );
+    opacity: 0.045;
+    pointer-events: none;
+    z-index: 0;
+    border-radius: 50%;
+}
+
+section[data-testid="stSidebar"] {
+    background-color: var(--bg-soft);
+    border-right: 1px solid var(--border);
+}
+section[data-testid="stSidebar"] * { color: var(--text); }
+
+/* ---- typography ---- */
+h1, h2, h3 {
+    font-family: 'Archivo', sans-serif;
+    color: var(--text);
+    letter-spacing: -0.01em;
+}
+h1 { font-weight: 900; }
+h2, h3 { font-weight: 700; }
+
+.app-title {
+    font-family: 'Archivo', sans-serif;
+    font-weight: 900;
+    font-size: 2.4rem;
+    color: var(--text);
+    margin-bottom: 0;
+    animation: riseIn 0.5s ease both;
+}
+.app-title .accent { color: var(--yellow); position: relative; }
+.app-title .accent::after {
+    content: "";
+    position: absolute;
+    left: 0; right: 0; bottom: 2px;
+    height: 4px;
+    background: var(--yellow);
+    border-radius: 2px;
+    transform-origin: left;
+    animation: underlineDraw 0.6s 0.35s cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+.subtle {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    animation: riseIn 0.5s 0.12s ease both;
+}
+
+/* ---- metrics ---- */
+div[data-testid="stMetric"] {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    transition: border-color 0.25s ease, transform 0.25s ease;
+    animation: riseIn 0.5s ease both;
+}
+div[data-testid="stMetric"]:hover {
+    border-color: var(--yellow-dim);
+    transform: translateY(-2px);
+}
+div[data-testid="stMetricValue"] { color: var(--text); font-family: 'Archivo', sans-serif; }
+div[data-testid="stMetricLabel"] { color: var(--text-muted); }
+
+/* ---- status badge (capsule, mirrors a pill-link aesthetic) ---- */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 22px;
+    border-radius: 999px;
+    font-family: 'Archivo', sans-serif;
+    font-weight: 700;
+    font-size: 1.02rem;
+    letter-spacing: 0.3px;
+    animation: riseIn 0.5s ease both;
+}
+.status-badge .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: currentColor;
+}
+.badge-green {
+    background-color: var(--green-soft);
+    color: var(--green);
+    border: 1px solid var(--green);
+}
+.badge-yellow {
+    background-color: var(--yellow-soft);
+    color: var(--yellow);
+    border: 1px solid var(--yellow);
+}
+.badge-red {
+    background-color: var(--red-soft);
+    color: var(--red);
+    border: 1px solid var(--red);
+    animation: riseIn 0.5s ease both, glowPulse 2.4s ease-in-out infinite;
+}
+.badge-red .dot { animation: dotPulse 1.4s ease-in-out infinite; }
+
+/* ---- section cards (fallback for the manual div wrapper) ---- */
+.section-card {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+}
+
+/* ---- real card containers: the two-column ECG / CT row ---- */
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="column"]:nth-child(2):last-child)
+    > div[data-testid="column"] > div[data-testid="stVerticalBlockBorderWrapper"],
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="column"]:nth-child(2):last-child)
+    > div[data-testid="column"] > div[data-testid="stVerticalBlock"] {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 20px 22px;
+    box-shadow: 6px 6px 0px 0px rgba(242, 184, 7, 0.05);
+    transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+    animation: riseIn 0.55s ease both;
+}
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="column"]:nth-child(2):last-child)
+    > div[data-testid="column"]:nth-child(2) > div[data-testid="stVerticalBlockBorderWrapper"],
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="column"]:nth-child(2):last-child)
+    > div[data-testid="column"]:nth-child(2) > div[data-testid="stVerticalBlock"] {
+    animation-delay: 0.1s;
+}
+div[data-testid="stHorizontalBlock"]:has(> div[data-testid="column"]:nth-child(2):last-child)
+    > div[data-testid="column"] > div[data-testid="stVerticalBlock"]:hover {
+    border-color: var(--border-strong);
+    box-shadow: 8px 8px 0px 0px rgba(242, 184, 7, 0.08);
+}
+
+/* ---- buttons (pill, mirrors an "OPEN LINK" capsule button) ---- */
+div.stButton > button {
+    width: 100%;
+    border-radius: 999px;
+    border: 1.5px solid var(--yellow-dim);
+    background-color: var(--surface-2);
+    color: var(--text);
+    font-family: 'Archivo', sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+    padding: 0.55rem 1rem;
+    transition: background-color 0.2s ease, border-color 0.2s ease,
+                color 0.2s ease, transform 0.15s ease;
+}
+div.stButton > button:hover {
+    background-color: var(--yellow);
+    border-color: var(--yellow);
+    color: #0a0906;
+    transform: translateY(-1px);
+}
+div.stButton > button:active { transform: translateY(0); }
+
+/* ---- inputs: sliders, number inputs, selects, toggles ---- */
+div[data-testid="stSlider"] [data-baseweb="slider"] > div > div { background: var(--border); }
+div[data-testid="stSlider"] [role="slider"] {
+    background-color: var(--yellow) !important;
+    border-color: var(--yellow) !important;
+    box-shadow: 0 0 0 4px var(--yellow-soft);
+}
+div[data-testid="stNumberInput"] input,
+div[data-baseweb="select"] > div,
+div[data-testid="stFileUploaderDropzone"] {
+    background-color: var(--surface) !important;
+    border: 1px solid var(--border) !important;
+    color: var(--text) !important;
+    border-radius: 10px !important;
+}
+div[data-testid="stFileUploaderDropzone"] {
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+div[data-testid="stFileUploaderDropzone"]:hover {
+    border-color: var(--yellow-dim) !important;
+    background-color: var(--surface-2) !important;
+}
+div[data-baseweb="checkbox"] { color: var(--text); }
+label[data-testid="stWidgetLabel"] p { color: var(--text-muted); font-weight: 500; }
+
+/* toggle switch accent when on */
+div[data-testid="stCheckbox"] div[aria-checked="true"],
+div[role="switch"][aria-checked="true"] {
+    background-color: var(--yellow) !important;
+    border-color: var(--yellow) !important;
+}
+
+/* ---- expander ---- */
+div[data-testid="stExpander"] {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+/* ---- alerts (info / error) ---- */
+div[data-testid="stAlert"] {
+    background-color: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+/* ---- progress bar: gradient fill with a slow shimmer sweep ---- */
+div[data-testid="stProgress"] > div > div {
+    background-color: var(--border) !important;
+    border-radius: 999px;
+}
+div[data-testid="stProgress"] > div > div > div {
+    background: linear-gradient(90deg, var(--yellow-dim), var(--yellow) 60%, var(--yellow));
+    background-size: 200px 100%;
+    animation: shimmer 2.6s linear infinite;
+    border-radius: 999px;
+    transition: width 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+hr, div[data-testid="stDivider"] { border-color: var(--border) !important; }
 </style>
 """
 st.markdown(DARK_CSS, unsafe_allow_html=True)
@@ -166,17 +381,17 @@ def load_waveform(file_path: str, original_name: str) -> np.ndarray:
 
 
 def plot_waveform(waveform: np.ndarray):
-    """Render an ECG waveform as a dark-themed matplotlib line plot."""
+    """Render an ECG waveform as a dark, amber-lined matplotlib plot."""
     fig, ax = plt.subplots(figsize=(5, 2.6))
-    fig.patch.set_facecolor("#12151c")
-    ax.set_facecolor("#12151c")
-    ax.plot(waveform, color="#22c55e", linewidth=1.1)
-    ax.set_xlabel("Sample", color="#9aa3b2", fontsize=8)
-    ax.set_ylabel("Amplitude", color="#9aa3b2", fontsize=8)
-    ax.tick_params(colors="#9aa3b2", labelsize=7)
+    fig.patch.set_facecolor("#16130e")
+    ax.set_facecolor("#16130e")
+    ax.plot(waveform, color="#f2b807", linewidth=1.2)
+    ax.set_xlabel("Sample", color="#9c9280", fontsize=8)
+    ax.set_ylabel("Amplitude", color="#9c9280", fontsize=8)
+    ax.tick_params(colors="#9c9280", labelsize=7)
     for spine in ax.spines.values():
-        spine.set_color("#2a2f3a")
-    ax.grid(alpha=0.15)
+        spine.set_color("#33291a")
+    ax.grid(alpha=0.15, color="#574726")
     fig.tight_layout()
     return fig
 
@@ -243,7 +458,7 @@ with st.sidebar:
 # --------------------------------------------------------------------------
 # Header
 # --------------------------------------------------------------------------
-st.title("🫀 CardioRisk AI")
+st.markdown('<div class="app-title">🫀 Cardio<span class="accent">Risk</span> AI</div>', unsafe_allow_html=True)
 st.markdown(
     '<p class="subtle">Multimodal cardiovascular risk stratification — '
     "tabular vitals, ECG waveform, and CT imaging fused into one composite score.</p>",
@@ -347,14 +562,18 @@ with dash_col2:
 with dash_col3:
     st.metric("CT Risk", f"{p_ct * 100:.1f}%")
 with dash_col4:
-    st.metric("Composite Risk", f"{composite_score * 100:.1f}%")
+    # composite_score already comes back from calculate_composite_risk() on
+    # a 0-100 scale, so it's displayed as-is (no second *100 multiply).
+    st.metric("Composite Risk", f"{composite_score:.1f}%")
 
 st.write("")
 badge_class = badge_for_status(status)
 st.markdown(
-    f'<div class="status-badge {badge_class}">Status: {status.upper()}</div>',
+    f'<div class="status-badge {badge_class}"><span class="dot"></span>Status: {status.upper()}</div>',
     unsafe_allow_html=True,
 )
 
 st.write("")
-st.progress(min(max(composite_score, 0.0), 1.0))
+# st.progress() expects a 0-1 fraction, but composite_score is 0-100, so
+# it's normalized here before clamping.
+st.progress(min(max(composite_score / 100.0, 0.0), 1.0))

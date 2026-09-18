@@ -1,10 +1,15 @@
-streamlit
-torch
-torchvision
-xgboost
-scikit-learn
-matplotlib
+# Core app
+streamlit>=1.32
 numpy
 pandas
+matplotlib
 pillow
-opencv-python
+
+# Tabular model
+scikit-learn
+joblib
+xgboost          # optional — ml_engine.py falls back to RandomForest/heuristic if absent
+
+# ECG + CT models
+torch
+torchvision

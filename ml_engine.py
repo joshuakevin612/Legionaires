@@ -74,6 +74,24 @@ try:
 except Exception:
     _HAS_PIL = False
 
+try:
+    import joblib  # type: ignore
+    _HAS_JOBLIB = True
+except Exception:
+    _HAS_JOBLIB = False
+
+
+# --------------------------------------------------------------------------
+# Trained-artifact discovery. If any of these files exist alongside this
+# script, they are loaded and used in place of the synthetic-data /
+# random-weight fallbacks. Produced by the companion train_*.py scripts.
+# --------------------------------------------------------------------------
+_MODEL_DIR = os.path.dirname(os.path.abspath(__file__))
+_TABULAR_XGB_PATH = os.path.join(_MODEL_DIR, "tabular_model.json")
+_TABULAR_SKLEARN_PATH = os.path.join(_MODEL_DIR, "tabular_model.pkl")
+_ECG_WEIGHTS_PATH = os.path.join(_MODEL_DIR, "ecg_cnn.pt")
+_CT_WEIGHTS_PATH = os.path.join(_MODEL_DIR, "ct_resnet.pt")
+
 
 # A fixed seed keeps mock/random-weight predictions reproducible across runs.
 _SEED = 42
@@ -171,15 +189,40 @@ def _make_synthetic_tabular_dataset(n_samples: int = 800):
 
 def _get_tabular_model():
     """
-    Lazily builds and caches an XGBoost model (preferred), falling back to
-    RandomForest, trained on a synthetic clinical dataset. Returns None if
-    neither library is installed, in which case the pure-formula baseline
-    in `predict_tabular_risk` is used instead.
+    Lazily loads and caches the tabular model, in priority order:
+      1. A real trained XGBoost model at tabular_model.json (produced by
+         train_tabular_model.py on real labeled data) -- preferred.
+      2. A real trained RandomForest model at tabular_model.pkl (same
+         script's fallback output when xgboost isn't installed).
+      3. An XGBoost/RandomForest model trained on synthetic data, as a
+         demo-quality stand-in.
+      4. None, in which case predict_tabular_risk() uses the pure-formula
+         baseline instead.
     """
     global _tabular_model
     if _tabular_model is not None:
         return _tabular_model
 
+    # --- 1. Real trained XGBoost model, if present ---
+    if _HAS_XGB and os.path.isfile(_TABULAR_XGB_PATH):
+        try:
+            model = xgb.XGBClassifier()
+            model.load_model(_TABULAR_XGB_PATH)
+            _tabular_model = ("xgboost", model)
+            return _tabular_model
+        except Exception:
+            pass  # fall through and try the next option
+
+    # --- 2. Real trained RandomForest model, if present ---
+    if _HAS_JOBLIB and os.path.isfile(_TABULAR_SKLEARN_PATH):
+        try:
+            model = joblib.load(_TABULAR_SKLEARN_PATH)
+            _tabular_model = ("random_forest", model)
+            return _tabular_model
+        except Exception:
+            pass  # fall through and try the next option
+
+    # --- 3. Demo model trained on synthetic data ---
     try:
         X, y = _make_synthetic_tabular_dataset()
         if _HAS_XGB:
@@ -383,13 +426,24 @@ _ecg_model = None
 
 
 def _get_ecg_model():
-    """Lazily builds and caches the 1D CNN (random-initialized weights)."""
+    """
+    Lazily builds and caches the 1D CNN. If a trained checkpoint exists at
+    ecg_cnn.pt (produced by train_ecg_model.py), those weights are loaded;
+    otherwise the architecture is used with random-initialized weights
+    (clearly a mock signal, not a real diagnostic prediction).
+    """
     global _ecg_model
     if not _HAS_TORCH:
         return None
     if _ecg_model is None:
         try:
             model = _ECGCNN()
+            if os.path.isfile(_ECG_WEIGHTS_PATH):
+                try:
+                    state_dict = torch.load(_ECG_WEIGHTS_PATH, map_location="cpu")
+                    model.load_state_dict(state_dict)
+                except Exception:
+                    pass  # keep random-initialized weights on any mismatch
             model.eval()
             _ecg_model = model
         except Exception:
@@ -479,6 +533,16 @@ def _get_ct_model():
             backbone = tv_models.resnet18(weights=None)
 
         backbone.fc = nn.Linear(backbone.fc.in_features, 1)
+
+        # If a fine-tuned checkpoint exists (produced by a CT training
+        # script), load it in place of the ImageNet/random-init weights.
+        if os.path.isfile(_CT_WEIGHTS_PATH):
+            try:
+                state_dict = torch.load(_CT_WEIGHTS_PATH, map_location="cpu")
+                backbone.load_state_dict(state_dict)
+            except Exception:
+                pass  # keep ImageNet/random-init weights on any mismatch
+
         backbone.eval()
         _resnet_model = backbone
     except Exception:
