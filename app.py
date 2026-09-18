@@ -1,5 +1,5 @@
 """
-CardioRisk AI — Multimodal Silent Stroke Risk Dashboard
+NEUROVASC-X — Multimodal Silent Stroke Risk Dashboard
 =========================================================
 A clean, dependency-light Streamlit app that fuses tabular vitals, an ECG
 waveform, and a CT scan into one composite stroke-risk score.
@@ -57,8 +57,8 @@ except Exception as exc:  # noqa: BLE001
 # Page configuration — MUST be the first Streamlit command.
 # --------------------------------------------------------------------------
 st.set_page_config(
-    page_title="CardioRisk AI",
-    page_icon="🫀",
+    page_title="NEUROVASC-X",
+    page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -193,7 +193,7 @@ def badge_for_status(status: str) -> str:
 # letting every downstream call raise and risk a broken page.
 # --------------------------------------------------------------------------
 if not ML_ENGINE_OK:
-    st.markdown('<div class="app-title">🫀 Cardio<span class="accent">Risk</span> AI</div>', unsafe_allow_html=True)
+    st.markdown('<div class="app-title">🧠 Neuro<span class="accent">Vasc</span>-X</div>', unsafe_allow_html=True)
     st.error(
         "Could not import ml_engine.py — the app cannot compute risk scores "
         "until this is fixed.\n\n"
@@ -241,7 +241,7 @@ with st.sidebar:
 # --------------------------------------------------------------------------
 # Header
 # --------------------------------------------------------------------------
-st.markdown('<div class="app-title">🫀 Cardio<span class="accent">Risk</span> AI</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-title">🧠 Neuro<span class="accent">Vasc</span>-X</div>', unsafe_allow_html=True)
 st.markdown(
     '<p class="subtle">Multimodal silent-stroke risk stratification — '
     "tabular vitals, ECG waveform, and CT imaging fused into one composite score.</p>",
